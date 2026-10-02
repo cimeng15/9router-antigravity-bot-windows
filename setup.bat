@@ -1,12 +1,9 @@
 @echo off
 REM ============================================================
-REM Setup Script - Bot AntiGravity API (Windows) — v2 (lebih tahan error)
-REM Perbaikan dibanding v1:
-REM   1. Cek versi Python (Camoufox butuh 3.10+, bukan sekadar 3.9)
-REM   2. Upgrade pip/setuptools/wheel dulu (pip lama = sumber error utama)
-REM   3. Install bertahap dengan fallback:
-REM      camoufox[geoip] -> camoufox (tanpa geoip) kalau gagal
-REM   4. "camoufox fetch" di-retry (download browser kadang gagal/timeout)
+REM Setup Script - Bot AntiGravity API (Windows) — v3 (CHROME)
+REM TIDAK lagi pakai Camoufox (sering error dependency di Windows).
+REM Sekarang pakai Google Chrome yang sudah ada di komputer + DrissionPage.
+REM Yang di-install cuma 1 package kecil: DrissionPage.
 REM ============================================================
 
 setlocal EnableExtensions
@@ -14,11 +11,11 @@ cd /d "%~dp0"
 set VENV_DIR=%~dp0.venv
 
 echo ==============================================
-echo   Bot AntiGravity - Setup (Windows)
+echo   Bot AntiGravity - Setup (Windows, Chrome)
 echo ==============================================
 echo.
 
-REM ---------- [1/6] Cari Python ----------
+REM ---------- [1/5] Cari Python ----------
 set PYTHON=
 py -3 --version >nul 2>&1 && set PYTHON=py -3
 if not defined PYTHON (
@@ -29,7 +26,6 @@ if not defined PYTHON (
     echo.
     echo         Install Python 3.10 atau lebih baru dari https://python.org
     echo         PENTING: centang "Add Python to PATH" saat install.
-    echo         Python 3.10 / 3.11 / 3.12 paling aman.
     pause
     exit /b 1
 )
@@ -38,18 +34,37 @@ for /f "tokens=2" %%v in ('%PYTHON% -c "import sys;print(sys.version.split()[0])
 echo [OK] Python ditemukan: %PYVER%
 echo.
 
-REM ---------- [2/6] Cek versi minimal 3.10 ----------
+REM ---------- [2/5] Cek versi minimal 3.10 ----------
 %PYTHON% -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)"
 if errorlevel 1 (
     echo [ERROR] Python yang terpasang: %PYVER%
-    echo         Camoufox butuh Python 3.10+ (lihat pypi.org/pypi/camoufox).
+    echo         Bot ini butuh Python 3.10 atau lebih baru.
     echo         Solusi: install Python 3.10 / 3.11 / 3.12 dari python.org,
     echo         lalu jalankan setup.bat lagi.
     pause
     exit /b 1
 )
 
-REM ---------- [3/6] Bikin virtual environment ----------
+REM ---------- [3/5] Cek Google Chrome ----------
+echo [INFO] Mencari Google Chrome...
+set CHROME_FOUND=
+if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set CHROME_FOUND=1
+if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" set CHROME_FOUND=1
+if exist "%LocalAppData%\Google\Chrome\Application\chrome.exe" set CHROME_FOUND=1
+
+if not defined CHROME_FOUND (
+    echo [ERROR] Google Chrome tidak ditemukan di lokasi standar!
+    echo.
+    echo         Bot ini memakai Chrome untuk login Google.
+    echo         Install Chrome dari: https://www.google.com/chrome/
+    echo         Lalu jalankan setup.bat lagi.
+    pause
+    exit /b 1
+)
+echo [OK] Google Chrome ditemukan!
+echo.
+
+REM ---------- [4/5] Bikin virtual environment ----------
 if exist "%VENV_DIR%\Scripts\python.exe" (
     echo [OK] Virtual environment sudah ada di .venv\
 ) else (
@@ -57,8 +72,7 @@ if exist "%VENV_DIR%\Scripts\python.exe" (
     %PYTHON% -m venv "%VENV_DIR%"
     if errorlevel 1 (
         echo [ERROR] Gagal membuat venv!
-        echo         Kemungkinan: instalasi Python tidak lengkap.
-        echo         Solusi: install ulang Python dan pilih instalasi lengkap.
+        echo         Solusi: install ulang Python dengan opsi lengkap.
         pause
         exit /b 1
     )
@@ -66,62 +80,24 @@ if exist "%VENV_DIR%\Scripts\python.exe" (
 )
 echo.
 
-REM ---------- [4/6] Upgrade pip, setuptools, wheel ----------
-echo [INFO] Upgrade pip / setuptools / wheel (mencegah error dependency)...
-"%VENV_DIR%\Scripts\python.exe" -m pip install --upgrade pip setuptools wheel
+REM ---------- [5/5] Install DrissionPage (satu-satunya dependency) ----------
+echo [INFO] Upgrade pip...
+"%VENV_DIR%\Scripts\python.exe" -m pip install --upgrade pip >nul 2>&1
+echo [INFO] Menginstall DrissionPage (package kecil, cepat)...
+"%VENV_DIR%\Scripts\python.exe" -m pip install DrissionPage
 if errorlevel 1 (
-    echo [WARN] Upgrade pip gagal, lanjut dengan pip bawaan...
-)
-echo.
-
-REM ---------- [5/6] Install camoufox (dengan fallback) ----------
-echo [INFO] Menginstall Camoufox + GeoIP...
-"%VENV_DIR%\Scripts\python.exe" -m pip install "camoufox[geoip]>=0.5.6"
-if errorlevel 1 (
-    echo.
-    echo [WARN] camoufox[geoip] gagal terpasang. Mencoba TANPA geoip...
-    echo        (fitur geoip hanya membuat lokasi IP konsisten, bot tetap
-    echo         jalan tanpa itu)
-    "%VENV_DIR%\Scripts\python.exe" -m pip install "camoufox>=0.5.6"
-    if errorlevel 1 (
-        echo.
-        echo [ERROR] Gagal menginstall Camoufox!
-        echo         Penyebab yang paling sering:
-        echo         1. Versi Python terlalu baru (baru rilis, belum ada
-        echo            wheel-nya) -^> pakai Python 3.10 / 3.11 / 3.12
-        echo         2. Antivirus memblokir pip -^> tambahkan folder ini dan
-        echo            folder Python ke exclusion antivirus
-        echo         3. Koneksi internet/proxy -^> coba jaringan lain
-        echo.
-        pause
-        exit /b 1
-    )
-)
-echo.
-
-REM ---------- [6/6] Unduh browser Camoufox (dengan retry) ----------
-echo [INFO] Mengunduh browser Camoufox (sekitar 150 MB, sekali saja)...
-"%VENV_DIR%\Scripts\python.exe" -m camoufox fetch
-if errorlevel 1 (
-    echo [WARN] Percobaan pertama gagal, mencoba lagi dalam 5 detik...
-    timeout /t 5 /nobreak >nul
-    "%VENV_DIR%\Scripts\python.exe" -m camoufox fetch
-    if errorlevel 1 (
-        echo [ERROR] Gagal mengunduh browser Camoufox setelah 2x percobaan.
-        echo         Biasanya karena koneksi ke GitHub terputus.
-        echo         Solusi: jalankan ulang setup.bat (unduhan dilanjutkan),
-        echo         atau pakai VPN/jaringan lain bila GitHub diblokir.
-        pause
-        exit /b 1
-    )
+    echo [ERROR] Gagal install DrissionPage.
+    echo         Solusi: cek koneksi internet, lalu jalankan ulang setup.bat
+    pause
+    exit /b 1
 )
 
 REM ---------- Verifikasi akhir ----------
 echo.
 echo [INFO] Verifikasi instalasi...
-"%VENV_DIR%\Scripts\python.exe" -c "from camoufox.sync_api import Camoufox; print('[OK] Camoufox siap dipakai!')"
+"%VENV_DIR%\Scripts\python.exe" -c "from DrissionPage import ChromiumPage; print('[OK] Bot siap dipakai!')"
 if errorlevel 1 (
-    echo [ERROR] Camoufox terpasang tapi tidak bisa diimport.
+    echo [ERROR] DrissionPage terpasang tapi tidak bisa diimport.
     echo         Coba jalankan setup.bat sekali lagi.
     pause
     exit /b 1
@@ -142,7 +118,8 @@ echo ==============================================
 echo   Setup selesai!
 echo.
 echo   Cara jalankan:
-echo   1. Isi akun.txt dengan: email^|password
-echo   2. Klik dua kali run.bat
+echo   1. Pastikan 9Router jalan (http://localhost:20128)
+echo   2. Isi akun.txt dengan: email^|password
+echo   3. Klik dua kali run.bat
 echo ==============================================
 pause

@@ -1,35 +1,30 @@
 #!/usr/bin/env python3
 """
-Bot AntiGravity - Auto Add Account ke 9Router (REVISI 3: API-DRIVEN)
+Bot AntiGravity - Auto Add Account ke 9Router (WINDOWS EDITION: CHROME)
 
-REVISI 3 — Kenapa pendekatannya diubah total:
-  Masalah versi lama (klik UI "Add Connection"):
-    - Setelah consent Google, browser di-redirect ke
-      http://localhost:443/callback?code=... — URL callback ini
-      menuju KOMPUTER USER (native app flow), bukan ke server 9Router.
-      Di server/VPS tidak ada yang listen di port 443/8080, jadi
-      alurnya selalu GAGAL walaupun login Google sukses.
-  Solusi sekarang (pakai API internal 9Router yang sama dipakai UI):
-    1. GET  /api/oauth/antigravity/authorize  → authUrl + state + codeVerifier
-    2. Browser (Camoufox) login Google; request redirect ke
-       http://localhost:8080/callback?code=... DITANGKAP via Playwright
-       route interception (tidak butuh server callback sama sekali)
-    3. POST /api/oauth/antigravity/exchange   → akun terdaftar di 9Router
-    4. GET  /api/providers                    → verifikasi akun masuk
+REVISI 4 (Windows): ganti Camoufox -> Chrome, selalu HEADED.
+  Alasan: Camoufox di Windows sering error saat install (dependency) dan
+  headless-nya bermasalah di Windows. Chrome lebih stabil:
+    - Selalu dibuka dengan jendela (HEADed) — TIDAK ada mode headless
+    - Tiap akun memakai PROFILE CHROME BARU (folder sementara)
+    - Profile sementara DIHAPUS otomatis setelah akun selesai
+      (tidak ada cache/cookie nyangkut antar akun)
 
-  Keuntungan:
-    - Tidak tergantung UI dashboard (aman kalau tampilan berubah)
-    - Tidak butuh server callback / port terbuka
-    - Kegagalan jelas: salah password / 2FA / CAPTCHA / timeout —
-      masing-masing punya pesan error spesifik
+Alur tetap API-driven (REVISI 3) — tidak butuh server callback:
+  1. GET  /api/oauth/antigravity/authorize  -> authUrl + state + codeVerifier
+  2. Chrome login Google; saat Google redirect ke
+     http://localhost:8080/callback?code=..., KODE DIBACA DARI URL
+     (halaman akan gagal load - itu NORMAL, kodenya sudah tertangkap)
+  3. POST /api/oauth/antigravity/exchange   -> akun terdaftar di 9Router
+  4. GET  /api/providers                    -> verifikasi akun masuk
 
 Cara pakai:
-  python bot_api.py                     # pakai default (http://localhost:20128)
-  python bot_api.py --base http://localhost:20128
-  python bot_api.py --headed            # lihat browser
+  python bot_api.py                     # default (http://localhost:20128)
+  python bot_api.py --fast              # delay minimal
+  python bot_api.py --delay 10          # jeda antar akun
   python bot_api.py --file akun.txt
-  python bot_api.py --delay 10
 
+SYARAT: Google Chrome terinstall di Windows.
 Format akun.txt: email|password (satu baris per akun)
 """
 
@@ -40,6 +35,9 @@ import os
 import sys
 import json
 import time
+import random
+import shutil
+import tempfile
 import argparse
 import subprocess
 import urllib.request
@@ -50,25 +48,30 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _ensure_deps():
-    """Pastikan camoufox terinstall + binary-nya sudah di-fetch."""
+    """Pastikan DrissionPage terinstall (bikin venv kalau perlu)."""
     try:
-        import camoufox  # noqa: F401
+        import DrissionPage  # noqa: F401
         return
     except ImportError:
         pass
+
     print("=" * 50)
-    print(" Camoufox belum terinstall! Menginstall otomatis...")
+    print(" DrissionPage belum terinstall! Menginstall otomatis...")
     print("=" * 50)
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "camoufox[geoip]"],
-    )
-    subprocess.check_call([sys.executable, "-m", "camoufox", "fetch"])
-    print("\n Camoufox berhasil diinstall!\n")
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "DrissionPage"],
+        )
+        print("\n DrissionPage berhasil diinstall!\n")
+    except subprocess.CalledProcessError:
+        print("\n [ERROR] Gagal install DrissionPage.")
+        print("         Jalankan manual: pip install DrissionPage")
+        sys.exit(1)
 
 
 _ensure_deps()
 
-from camoufox.sync_api import Camoufox  # noqa: E402
+from DrissionPage import ChromiumPage, ChromiumOptions  # noqa: E402
 
 # ============================================================
 # KONFIGURASI
@@ -209,11 +212,70 @@ def remove_account(path, raw_line):
 
 
 # ============================================================
-# HELPER KLIK DI HALAMAN GOOGLE
+# HELPER: OPERASI DI HALAMAN GOOGLE
 # ============================================================
+def find_and_click(page_or_tab, locators, timeout=5, desc="element"):
+    """Cari elemen dari list locator DrissionPage, klik yang pertama ketemu."""
+    for locator in locators:
+        try:
+            ele = page_or_tab.ele(locator, timeout=timeout)
+            if ele:
+                ele.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def force_input(page_or_tab, locator, text, timeout=15, desc="field"):
+    """Input teks ke field dengan beberapa strategi fallback."""
+    ele = page_or_tab.ele(locator, timeout=timeout)
+    if ele is None:
+        raise Exception(f"Elemen {desc} tidak ditemukan: {locator}")
+
+    # Strategi 1: .input() standar
+    try:
+        ele.clear()
+        ele.input(text)
+        time.sleep(0.5)
+        if text in (ele.attr("value") or ele.attr("value") or ""):
+            return ele
+    except Exception:
+        pass
+
+    # Strategi 2: input via JS + event (React/form Google kadang butuh ini)
+    try:
+        ele.click()
+        time.sleep(0.3)
+        ele.run_js("""
+            this.focus();
+            this.value = arguments[0];
+            this.dispatchEvent(new Event('input', {bubbles: true}));
+            this.dispatchEvent(new Event('change', {bubbles: true}));
+        """, text)
+        time.sleep(0.5)
+        if text in (ele.attr("value") or ""):
+            return ele
+    except Exception:
+        pass
+
+    # Strategi 3: ketik via actions (paling mirip manusia)
+    try:
+        ele.click()
+        time.sleep(0.3)
+        page_or_tab.actions.type(text)
+        time.sleep(0.5)
+        if text in (ele.attr("value") or ""):
+            return ele
+    except Exception:
+        pass
+
+    raise Exception(f"Gagal input teks ke {desc}")
+
+
 # REVISI: Google bisa menampilkan halaman consent dalam bahasa Indonesia
 # ATAU Inggris, tergantung lokasi IP. Contoh nyata (IP Indonesia):
-#   "Pastikan Anda mendownload aplikasi ini dari Google" → tombol "Login"
+#   "Pastikan Anda mendownload aplikasi ini dari Google" -> tombol "Login"
 # Kata kunci diurutkan dari yang PALING AMAN — jangan pernah klik
 # "Batal" / "Cancel" / "No" / "Sign out".
 CONSENT_KEYWORDS = [
@@ -227,35 +289,36 @@ CONSENT_KEYWORDS = [
     "Next", "Berikutnya",
 ]
 
-
-def js_click_any(page, texts, exact=False):
-    """Klik elemen (button/a) yang teksnya cocok, via JS. Return True jika sukses."""
-    script = """
-    ([texts, exact]) => {
-        const norm = s => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
-        const els = [...document.querySelectorAll('button, a, input[type="submit"]')];
-        for (const t of texts) {
-            const target = norm(t);
-            const el = els.find(e => {
-                const txt = norm(e.innerText || e.value);
-                return exact ? txt === target : txt.includes(target);
-            });
-            if (el) { el.click(); return true; }
-        }
-        return false;
+_CONSENT_JS = """
+([texts, exact]) => {
+    const norm = s => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const els = [...document.querySelectorAll('button, a, input[type="submit"]')];
+    for (const t of texts) {
+        const target = norm(t);
+        const el = els.find(e => {
+            const txt = norm(e.innerText || e.value);
+            return exact ? txt === target : txt.includes(target);
+        });
+        if (el) { el.click(); return true; }
     }
-    """
+    return false;
+}
+"""
+
+
+def js_click_any(tab, texts, exact=False):
+    """Klik elemen (button/a) yang teksnya cocok, via JS. Return True jika sukses."""
     try:
-        return page.evaluate(script, [texts, exact])
+        return tab.run_js(_CONSENT_JS, texts, exact)
     except Exception:
         return False
 
 
-def js_click_consent(page):
+def js_click_consent(tab):
     """Klik tombol consent di halaman Google — exact-match dulu (aman
     untuk tombol pendek seperti 'Login'), baru partial-match frasa panjang.
     Terakhir: exact-match Login/Masuk/Sign in (khusus halaman nativeapp)."""
-    if js_click_any(page, CONSENT_KEYWORDS, exact=True):
+    if js_click_any(tab, CONSENT_KEYWORDS, exact=True):
         return True
     long_phrases = [
         "I Understand", "I understand", "Saya memahami",
@@ -263,33 +326,96 @@ def js_click_consent(page):
         "Konfirmasi", "Confirm", "Saya setuju", "I agree",
         "Enter the password again", "Berikutnya", "Next",
     ]
-    if js_click_any(page, long_phrases, exact=False):
+    if js_click_any(tab, long_phrases, exact=False):
         return True
-    return js_click_any(page, ["Login", "Masuk", "Sign in"], exact=True)
+    return js_click_any(tab, ["Login", "Masuk", "Sign in"], exact=True)
 
 
-def detect_login_error(page):
+_LOGIN_ERR_JS = """
+() => {
+    const t = document.body.innerText.toLowerCase();
+    if (t.includes('wrong password') || t.includes('sandi salah')
+        || t.includes('kata sandi salah'))
+        return 'Password salah (Google: Wrong password)';
+    if (t.includes("couldn't find your google account")
+        || t.includes('tidak menemukan akun google')
+        || t.includes('tidak dapat menemukan akun google'))
+        return 'Email tidak ditemukan (Google: Account not found)';
+    return null;
+}
+"""
+
+
+def detect_login_error(tab):
     """Deteksi halaman error login (EN + ID). Return pesan atau None."""
     try:
-        return page.evaluate("""() => {
-            const t = document.body.innerText.toLowerCase();
-            if (t.includes('wrong password') || t.includes('sandi salah')
-                || t.includes('kata sandi salah'))
-                return 'Password salah (Google: Wrong password)';
-            if (t.includes("couldn't find your google account")
-                || t.includes('tidak menemukan akun google')
-                || t.includes('tidak dapat menemukan akun google'))
-                return 'Email tidak ditemukan (Google: Account not found)';
-            return null;
-        }""")
+        return tab.run_js(_LOGIN_ERR_JS)
     except Exception:
         return None
+
+
+def parse_callback_code(url):
+    """Ambil kode OAuth dari URL callback. Return (code, state) atau None."""
+    if f"localhost:{REDIRECT_PORT}/callback" not in url:
+        return None
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    if "code" in q:
+        return q["code"][0], (q.get("state") or [""])[0]
+    if "error" in q:
+        return "__error__", (q.get("error_description") or q["error"])[0]
+    return None
+
+
+# ============================================================
+# CHROME: PROFILE SEMENTARA
+# ============================================================
+def launch_chrome():
+    """Buka Chrome HEADED dengan profile sementara baru.
+    Return (page, profile_dir)."""
+    profile_dir = tempfile.mkdtemp(prefix="ag_chrome_")
+
+    co = ChromiumOptions()
+    # PENTING: JANGAN pakai auto_port() — di beberapa versi DrissionPage
+    # menghasilkan address tanpa port dan crash saat connect.
+    co.set_local_port(random.randint(19200, 29200))
+    co.set_user_data_path(profile_dir)  # profile baru, terisolasi
+    co.set_argument("--start-maximized")
+    co.set_argument("--disable-blink-features=AutomationControlled")
+    co.set_argument("--no-first-run")
+    co.set_argument("--no-default-browser-check")
+    co.set_argument("--disable-dev-shm-usage")
+    # HEADED SELALU — tidak ada headless di versi Windows ini
+
+    page = ChromiumPage(co)
+    return page, profile_dir
+
+
+def close_chrome(page, profile_dir):
+    """Tutup Chrome dan hapus profile sementaranya."""
+    try:
+        page.quit()
+    except Exception:
+        pass
+    # Windows kadang masih mengunci folder beberapa saat setelah quit —
+    # coba hapus beberapa kali, diamkan kalau gagal.
+    for _ in range(5):
+        try:
+            if os.path.exists(profile_dir):
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            if not os.path.exists(profile_dir):
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+    else:
+        print(" [INFO]   Profil sementara belum bisa dihapus (akan terhapus"
+              " saat Windows restart folder temp)")
 
 
 # ============================================================
 # FUNGSI UTAMA: PROSES SATU AKUN
 # ============================================================
-def process_account(account, index, total, headed, t, base):
+def process_account(account, index, total, t, base):
     email = account["email"]
     password = account["password"]
 
@@ -302,111 +428,86 @@ def process_account(account, index, total, headed, t, base):
     oauth = start_oauth(base)
     state, verifier = oauth["state"], oauth["codeVerifier"]
     print(f"        redirect_uri : {oauth.get('redirectUri', REDIRECT_URI)}")
-    print(f"        state        : {state[:20]}...")
 
-    # --- [2/6] Siapkan penangkap kode (route interception) ---
-    captured = {}
-
-    def _intercept_callback(route):
-        q = urllib.parse.parse_qs(
-            urllib.parse.urlparse(route.request.url).query)
-        if "code" in q:
-            captured["code"] = q["code"][0]
-            captured["state"] = (q.get("state") or [""])[0]
-            print("        >> Kode OAuth tertangkap dari redirect!")
-        elif "error" in q:
-            captured["error"] = (q.get("error_description")
-                                 or q["error"])[0]
-            print(f"        >> Google mengembalikan error: {captured['error']}")
-        try:
-            route.abort()
-        except Exception:
-            pass
-
-    print(" [2/6] Membuka Camoufox (anti-detect Firefox)...")
-    # REVISI: geoip opsional — kalau package geoip2 tidak ada (fallback
-    # install tanpa geoip), jangan sampai bot gagal total.
-    cam_kwargs = dict(
-        headless=not headed,
-        humanize=True,
-        i_know_what_im_doing=True,
-    )
+    # --- [2/6] Buka Chrome dengan profile sementara baru ---
+    print(" [2/6] Membuka Chrome (headed, profile baru)...")
+    page = None
+    profile_dir = None
     try:
-        import geoip2  # noqa: F401
-        cam_kwargs["geoip"] = True
-    except ImportError:
-        print("        [INFO] geoip2 tidak terpasang — jalan tanpa geoip")
-
-    with Camoufox(**cam_kwargs) as browser:
-        context = browser.new_context(locale="en-US")
-        context.route(f"http://localhost:{REDIRECT_PORT}/**",
-                      _intercept_callback)
-        page = context.new_page()
+        page, profile_dir = launch_chrome()
 
         # --- [3/6] Buka halaman login Google ---
         print(" [3/6] Membuka halaman login Google...")
-        page.goto(oauth["authUrl"], wait_until="domcontentloaded",
-                  timeout=60000)
-        try:
-            page.wait_for_load_state("networkidle", timeout=20000)
-        except Exception:
-            pass
+        page.get(oauth["authUrl"])
         time.sleep(t["google_initial"])
 
         # --- [4/6] Login Google ---
         print(f" [4/6] Login Google: {email}")
-        try:
-            email_field = page.wait_for_selector(
-                "#identifierId", timeout=t["password_timeout"] * 1000)
-            email_field.fill(email)
-        except Exception:
-            raise Exception(
-                "Field email Google tidak ditemukan (halaman tidak dikenal / "
-                f"URL sekarang: {page.url[:80]})")
+        force_input(page, "#identifierId", email,
+                    timeout=t["password_timeout"], desc="email field")
         time.sleep(0.5)
-        try:
-            page.click("#identifierNext", timeout=5000)
-        except Exception:
-            if not js_click_any(page, ["Next", "Berikutnya"]):
-                raise Exception("Tombol Next (email) tidak ditemukan")
+        if not find_and_click(page, [
+            "#identifierNext",
+            "tag:button@@text():Next",
+            "tag:button@@text():Berikutnya",
+        ], timeout=5, desc="Next (email)"):
+            raise Exception("Tombol Next (email) tidak ditemukan")
         time.sleep(t["after_email_next"])
 
-        try:
-            pw_field = page.wait_for_selector(
-                'input[type="password"]', timeout=t["password_timeout"] * 1000)
-            pw_field.fill(password)
-        except Exception:
+        pw_done = False
+        for loc in ("@type=password", "tag:input@@type=password", "@name=Passwd"):
+            try:
+                force_input(page, loc, password,
+                            timeout=t["password_timeout"], desc="password field")
+                pw_done = True
+                break
+            except Exception:
+                continue
+        if not pw_done:
             err = detect_login_error(page)
             if err:
                 raise Exception(err)
             raise Exception(
                 f"Field password tidak muncul (mungkin email salah / 2FA. "
-                f"URL: {page.url[:80]})")
+                f"URL: {(page.url or '')[:80]})")
         time.sleep(0.5)
-        try:
-            page.click("#passwordNext", timeout=5000)
-        except Exception:
-            if not js_click_any(page, ["Next", "Berikutnya"]):
-                raise Exception("Tombol Next (password) tidak ditemukan")
+        if not find_and_click(page, [
+            "#passwordNext",
+            "tag:button@@text():Next",
+            "tag:button@@text():Berikutnya",
+        ], timeout=5, desc="Next (password)"):
+            raise Exception("Tombol Next (password) tidak ditemukan")
         time.sleep(t["after_pw_next"])
 
         # --- [5/6] Handle konfirmasi Google sampai kode tertangkap ---
+        # Saat Google redirect ke localhost:8080/callback, halaman GAGAL
+        # dimuat — itu NORMAL. Kode cukup dibaca dari URL-nya.
         print(" [5/6] Menunggu konfirmasi Google & kode OAuth...")
+        print("        (halaman error 'site can't be reached' setelah ini"
+              " = NORMAL, bukan gagal)")
         deadline = time.time() + CODE_WAIT_TIMEOUT
         step = 0
+        code = err_msg = cb_state = None
+
         while time.time() < deadline:
-            if "code" in captured or "error" in captured:
-                break
             step += 1
             time.sleep(t["step_loop_wait"])
 
             try:
-                current_url = page.url
+                current_url = page.url or ""
             except Exception:
                 break  # tab ditutup
 
-            if f"localhost:{REDIRECT_PORT}/callback" in current_url:
-                break  # redirect terjadi, kode mestinya sudah tertangkap
+            # Kode tertangkap dari URL callback?
+            parsed = parse_callback_code(current_url)
+            if parsed:
+                if parsed[0] == "__error__":
+                    err_msg = parsed[1]
+                    print(f"        >> Google mengembalikan error: {err_msg}")
+                else:
+                    code, cb_state = parsed
+                    print("        >> Kode OAuth tertangkap dari URL!")
+                break
 
             err = detect_login_error(page)
             if err:
@@ -416,7 +517,8 @@ def process_account(account, index, total, headed, t, base):
                 print(f"        [Step {step}] URL: {current_url[:80]}")
 
             # Halaman Workspace TOS: "Welcome to your new account"
-            if "workspacetermsofservice" in current_url or "speedbump" in current_url:
+            if ("workspacetermsofservice" in current_url
+                    or "speedbump" in current_url):
                 print("        >> Halaman 'Welcome to your new account' terdeteksi")
                 if js_click_consent(page):
                     print("        >> 'I understand' diklik!")
@@ -431,27 +533,34 @@ def process_account(account, index, total, headed, t, base):
 
             # Centang checkbox consent yang belum dicentang (kalau ada)
             try:
-                page.evaluate("""() => document.querySelectorAll(
-                       'input[type="checkbox"]:not(:checked)')
-                   .forEach(cb => cb.click())""")
+                page.run_js("""
+                    document.querySelectorAll('input[type="checkbox"]:not(:checked)')
+                        .forEach(cb => cb.click());
+                """)
             except Exception:
                 pass
 
             time.sleep(t["no_btn_wait"])
 
-        if "error" in captured:
-            raise Exception(f"Google menolak consent: {captured['error']}")
-        if "code" not in captured:
+        if err_msg:
+            raise Exception(f"Google menolak consent: {err_msg}")
+        if not code:
             raise Exception(
                 f"Kode OAuth tidak tertangkap dalam {CODE_WAIT_TIMEOUT} detik "
-                f"(kemungkinan stuck di halaman: {page.url[:80]})")
+                f"(kemungkinan stuck di halaman: {(page.url or '')[:80]})")
 
-        if captured.get("state") and captured["state"] != state:
+        if cb_state and cb_state != state:
             raise Exception("State OAuth tidak cocok — kemungkinan sesi kedaluwarsa")
 
-        # --- [6/6] Exchange kode → akun terdaftar di 9Router ---
+        # --- [6/6] Exchange kode -> akun terdaftar di 9Router ---
         print(" [6/6] Mendaftarkan akun ke 9Router (exchange)...")
-        exchange_code(captured["code"], state, verifier, base)
+        exchange_code(code, state, verifier, base)
+
+    finally:
+        # Selalu tutup Chrome + hapus profile sementara, sukses maupun gagal
+        if page is not None:
+            print(" [INFO] Menutup Chrome & menghapus profile sementara...")
+            close_chrome(page, profile_dir)
 
     # --- Verifikasi akun benar-benar masuk ---
     time.sleep(t["after_success"])
@@ -474,10 +583,9 @@ def main():
     global BASE_URL, REDIRECT_PORT, REDIRECT_URI, AKUN_FILE
 
     parser = argparse.ArgumentParser(
-        description="Bot AntiGravity - Auto Add Account ke 9Router (API-driven)"
+        description="Bot AntiGravity - Auto Add Account ke 9Router "
+                    "(Windows / Chrome / headed)"
     )
-    parser.add_argument("--headed", action="store_true",
-                        help="Tampilkan browser (default: headless)")
     parser.add_argument("--fast", action="store_true",
                         help="Mode cepat (internet bagus, delay minimal)")
     parser.add_argument("--delay", type=int, default=DELAY_ANTAR_AKUN,
@@ -503,11 +611,19 @@ def main():
 
     print_banner()
 
+    # Bersihkan profil sementara sisa run sebelumnya (kalau ada)
+    tmp = tempfile.gettempdir()
+    for old in os.listdir(tmp):
+        if old.startswith("ag_chrome_"):
+            shutil.rmtree(os.path.join(tmp, old), ignore_errors=True)
+
     # Sanity check: 9Router harus bisa dihubungi
     try:
         api_get("/api/providers", base=BASE_URL, timeout=15)
     except Exception as e:
         print(f" [ERROR] 9Router tidak bisa dihubungi di {BASE_URL}: {e}")
+        print("         Pastikan 9Router berjalan (buka "
+              "http://localhost:20128 di browser)")
         sys.exit(1)
 
     accounts = read_accounts(AKUN_FILE)
@@ -518,8 +634,8 @@ def main():
 
     before = get_antigravity_emails(BASE_URL)
     print(f" Target      : {BASE_URL}")
+    print(f" Browser     : Chrome (HEADED — selalu tampil jendela)")
     print(f" Speed mode  : {speed_mode.upper()}")
-    print(f" Headless    : {'TIDAK (headed)' if args.headed else 'YA (default)'}")
     print(f" Delay antar : {args.delay} detik")
     print(f" File akun   : {AKUN_FILE}")
     print(f" Akun terdaftar sudah: {len(before)}")
@@ -528,8 +644,7 @@ def main():
     sukses, gagal = 0, 0
     for i, account in enumerate(accounts):
         try:
-            process_account(account, i, len(accounts),
-                            headed=args.headed, t=t, base=BASE_URL)
+            process_account(account, i, len(accounts), t=t, base=BASE_URL)
             remaining = read_accounts(AKUN_FILE)
             if account["raw"] not in [a["raw"] for a in remaining]:
                 sukses += 1
@@ -559,7 +674,7 @@ def print_banner():
    /  |/ / _ \/ ___/ / / / __/ __ \/ ___/ __ `/ _ \
   / /|  /  __/ /  / /_/ / /_/ /_/ / /  / /_/ /  __/
  /_/ |_/\___/_/   \__,_/\__/\____/_/   \__,_/\___/
-    Bot Auto Add Account - API-driven (Camoufox)
+    Bot Auto Add Account - Chrome HEADED (Windows)
     """
     print(banner)
     print("=" * 55)
