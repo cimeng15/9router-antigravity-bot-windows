@@ -324,12 +324,18 @@ def process_account(account, index, total, headed, t, base):
             pass
 
     print(" [2/6] Membuka Camoufox (anti-detect Firefox)...")
+    # REVISI: geoip opsional — kalau package geoip2 tidak ada (fallback
+    # install tanpa geoip), jangan sampai bot gagal total.
     cam_kwargs = dict(
         headless=not headed,
-        geoip=True,
         humanize=True,
         i_know_what_im_doing=True,
     )
+    try:
+        import geoip2  # noqa: F401
+        cam_kwargs["geoip"] = True
+    except ImportError:
+        print("        [INFO] geoip2 tidak terpasang — jalan tanpa geoip")
 
     with Camoufox(**cam_kwargs) as browser:
         context = browser.new_context(locale="en-US")

@@ -1,1 +1,4 @@
-camoufox[geoip]
+# Camoufox butuh Python 3.10+ (lihat pypi.org/pypi/camoufox)
+# setup.bat akan upgrade pip dulu; kalau camoufox[geoip] gagal,
+# setup otomatis fallback ke "camoufox" biasa (tanpa geoip).
+camoufox[geoip]>=0.5.6

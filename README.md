@@ -24,7 +24,8 @@ tidak perlu klik UI dashboard dan tidak butuh server callback.
 ## Requirements
 
 1. **Windows 10 / 11**
-2. **Python 3.9+** — download dari [python.org](https://www.python.org/downloads/)
+2. **Python 3.10+** (wajib — Camoufox tidak mendukung di bawah 3.10;
+   versi paling stabil: **3.10 / 3.11 / 3.12**)
    > ⚠️ Saat install, **centang "Add Python to PATH"** — ini WAJIB
 3. **9Router** berjalan di komputer yang sama (`http://localhost:20128`)
    dengan opsi **login tidak diwajibkan** (require login disabled)
@@ -212,10 +213,21 @@ Cek dengan: `py --version` di CMD.
 - Jalankan dengan `--headed` untuk melihat di halaman mana bot berhenti
 - Halaman Google bisa berubah — pesan error dari bot membantu debugging
 
-### Gagal install / download Camoufox
-- Cek koneksi internet
-- Jalankan ulang `setup.bat`
-- Atau manual: `.venv\Scripts\python -m camoufox fetch`
+### Gagal install Camoufox saat setup
+
+`setup.bat` v2 sudah menangani sendiri penyebab yang paling sering.
+Kalau **masih** gagal, cek pesan errornya dan cocokkan dengan daftar ini:
+
+| Pesan error | Penyebab | Solusi |
+|---|---|---|
+| `error: externally-managed...` / `No matching distribution` | Python terlalu baru (mis. 3.13 yang baru rilis, wheel belum tersedia) atau terlalu tua (< 3.10) | Install **Python 3.10 / 3.11 / 3.12** dari [python.org](https://www.python.org/downloads/), lalu hapus folder `.venv` dan jalankan ulang `setup.bat` |
+| `Microsoft Visual C++ 14.0 or greater is required` | Ada package yang perlu di-compile, pip terlalu tua mencoba build dari source | `setup.bat` v2 sudah upgrade pip dulu sehingga jarang terjadi. Kalau tetap muncul: install [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) atau ulangi setup dengan Python 3.11 |
+| `geoip2 ... error` | Gagal install ekstra geoip | Tidak fatal — setup otomatis fallback tanpa geoip, bot tetap jalan |
+| `Timeout / connection error` saat `camoufox fetch` | Koneksi ke GitHub terputus / diblokir | Jalankan ulang `setup.bat` (unduhan dilanjutkan), atau pakai VPN |
+| Antivirus memblokir pip / python | False positive | Tambahkan folder ini + folder Python ke exclusion antivirus |
+
+> Tips cepat: hapus folder `.venv` lalu jalankan ulang `setup.bat` —
+> setup v2 bersifat idempotent dan bisa diulang berkali-kali dengan aman.
 
 ### Antivirus / Windows Defender memblokir
 - Tambahkan folder ini ke exclusion Defender
